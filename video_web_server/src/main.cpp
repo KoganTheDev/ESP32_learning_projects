@@ -1,16 +1,17 @@
 #include <Arduino.h>
 #include "esp_camera.h"
+#include "esp_http_server.h" // Changed from https to http
 #include <WiFi.h>
-#include "esp_http_server.h" 
 
-#define CAMERA_MODEL_WROVER_KIT
+// --- Camera Model Pin Definitions ---
+#define CAMERA_MODEL_WROVER_KIT 
+
 #if defined(CAMERA_MODEL_WROVER_KIT)
   #define PWDN_GPIO_NUM    -1
   #define RESET_GPIO_NUM   -1
   #define XCLK_GPIO_NUM    21
   #define SIOD_GPIO_NUM    26
   #define SIOC_GPIO_NUM    27
-
   #define Y9_GPIO_NUM      35
   #define Y8_GPIO_NUM      34
   #define Y7_GPIO_NUM      39
@@ -24,24 +25,19 @@
   #define PCLK_GPIO_NUM    22
 #endif
 
-// --- Credentials ---
-const char *ssid_Router     = "izek";      
-const char *password_Router = "0506272831";  
+// --- WiFi Credentials ---
+const char* ssid     = "SSID";     
+const char* password = "PASSWORD"; 
 
-// --- Server Variables ---
+// --- MJPEG Streaming Constants ---
 #define PART_BOUNDARY "123456789000000000000987654321"
 static const char* _STREAM_CONTENT_TYPE = "multipart/x-mixed-replace;boundary=" PART_BOUNDARY;
 static const char* _STREAM_BOUNDARY = "\r\n--" PART_BOUNDARY "\r\n";
 static const char* _STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n";
 
 httpd_handle_t stream_httpd = NULL;
-camera_config_t config;
 
-// --- Forward Declarations ---
-void camera_init_config();
-void startCameraServer();
-
-// --- Handlers ---
+// --- 1. Stream Handler (Moved up so startCameraServer can see it) ---
 static esp_err_t stream_handler(httpd_req_t *req) {
   camera_fb_t * fb = NULL;
   esp_err_t res = ESP_OK;
@@ -72,6 +68,7 @@ static esp_err_t stream_handler(httpd_req_t *req) {
     if (res == ESP_OK) {
       res = httpd_resp_send_chunk(req, _STREAM_BOUNDARY, strlen(_STREAM_BOUNDARY));
     }
+    
     if (fb) {
       esp_camera_fb_return(fb);
       fb = NULL;
@@ -84,6 +81,7 @@ static esp_err_t stream_handler(httpd_req_t *req) {
   return res;
 }
 
+// --- 2. Start Server Function ---
 void startCameraServer() {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.server_port = 80;
@@ -101,7 +99,13 @@ void startCameraServer() {
   }
 }
 
-void camera_init_config() {
+// --- 3. Main Setup ---
+void setup() {
+  Serial.begin(115200);
+  Serial.setDebugOutput(true);
+  Serial.println();
+
+  camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer = LEDC_TIMER_0;
   config.pin_d0 = Y2_GPIO_NUM;
@@ -120,37 +124,51 @@ void camera_init_config() {
   config.pin_sccb_scl = SIOC_GPIO_NUM;
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
-  config.xclk_freq_hz = 20000000; 
-  config.frame_size = FRAMESIZE_VGA;
-  config.pixel_format = PIXFORMAT_JPEG; 
-  config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
+  config.xclk_freq_hz = 20000000; // OV3660 performs better at 20MHz
+  config.pixel_format = PIXFORMAT_JPEG;
+  config.grab_mode = CAMERA_GRAB_WHEN_EMPTY; // Important for OV3660
   config.fb_location = CAMERA_FB_IN_PSRAM;
-  config.jpeg_quality = 12; 
-  config.fb_count = 2;
-}
 
-void setup() {
-  Serial.begin(115200);
-  camera_init_config();
+  if(psramFound()){
+    config.frame_size = FRAMESIZE_QVGA; // Start small for stability
+    config.jpeg_quality = 12;
+    config.fb_count = 2;
+  } else {
+    config.frame_size = FRAMESIZE_SVGA;
+    config.jpeg_quality = 12;
+    config.fb_count = 1;
+  }
+
+  // Camera init
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
-    Serial.printf("Camera init failed: 0x%x", err);
+    Serial.printf("Camera init failed with error 0x%x", err);
     return;
   }
 
+  // OV3660 Sensor Specific Fixes
   sensor_t * s = esp_camera_sensor_get();
   if (s->id.PID == OV3660_PID) {
-    s->set_vflip(s, 1);
+    s->set_vflip(s, 1); // WROVER cameras are often inverted
+    s->set_brightness(s, 1);
   }
 
-  WiFi.begin(ssid_Router, password_Router);
+  WiFi.begin(ssid, password);
+  WiFi.setSleep(false); // Important for video streaming stability
+
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
-  
+  Serial.println("\nWiFi connected");
+
   startCameraServer();
-  Serial.printf("\nStream ready at: http://%s\n", WiFi.localIP().toString().c_str());
+
+  Serial.print("Camera Ready! Use 'http://");
+  Serial.print(WiFi.localIP());
+  Serial.println("' to connect");
 }
 
-void loop() { delay(1); }
+void loop() {
+  delay(1); 
+}
